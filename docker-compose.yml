@@ -1,0 +1,4 @@
+services:
+  scraper:
+    build: .
+    restart: unless-stopped
