@@ -511,7 +511,7 @@ async function findScrollablePanel(page) {
 async function sendDataToN8N(reviews) {
     if (reviews.length > 0) {
         try {
-            const res = await fetch('https://automation.hoplixe.app/webhook-test/5bcb114a-c228-437a-9767-7c43f30b65cd', {
+            const res = await fetch('https://automation.hoplixe.app/webhook/5bcb114a-c228-437a-9767-7c43f30b65cd', {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
