@@ -9,10 +9,11 @@ dotenv.config();
 
 const CLEAN_URL = "https://www.google.com/maps/place/Premium+Car+Deals/@44.8516607,-0.5128186,773m/data=!3m1!1e3!4m18!1m9!3m8!1s0xd552f8a749d488b:0x6a148d81a3a659a6!2sPremium+Car+Deals!8m2!3d44.8516608!4d-0.5079477!9m1!1b1!16s%2Fg%2F11yqydj2xn!3m7!1s0xd552f8a749d488b:0x6a148d81a3a659a6!8m2!3d44.8516608!4d-0.5079477!9m1!1b1!16s%2Fg%2F11yqydj2xn?entry=ttu&g_ep=EgoyMDI1MTIwOS4wIKXMDSoASAFQAw%3D%3D";
 
+
+
 // ========================================================================
 // ✅ GESTION DU CONSENTEMENT (CORRIGÉ)
 // ========================================================================
-
 
 async function acceptGoogleConsent(page) {
     try {
@@ -28,7 +29,7 @@ async function acceptGoogleConsent(page) {
             console.log('[CONSENT] ✅ Clic effectué, attente redirection...');
 
             // Attendre redirection vers Google Maps
-            await page.waitForURL(/google\.com\/maps/, { timeout: 15000 });
+            // await page.waitForURL(/google\.com\/maps/, { timeout: 60000 });
             console.log('[CONSENT] ✅ Redirection vers Google Maps réussie');
             return true;
         }
@@ -60,182 +61,67 @@ async function acceptGoogleConsent(page) {
         console.error('[CONSENT] ❌ Erreur:', err.message);
 
         // Debug screenshot
-        try {
-            const consentErrorScreenshot = await page.screenshot({ type: 'png', fullPage: true });
-            console.log(`[SCREENSHOT:consent-error] image/png;base64,${consentErrorScreenshot.toString('base64')}`);
-        } catch (e) { }
+
 
         return false;
     }
 }
 
-// ========================================================================
-// ✅ BYPASS POPUP MOBILE
-// ========================================================================
+function parseReview(raw) {
+    if (!Array.isArray(raw) || !raw[0]?.[1]) return null;
 
-async function bypassMapsPopupWithRetry(page, maxRetries = 3) {
-    let attempt = 0;
-    while (attempt < maxRetries) {
-        try {
-            attempt++;
-            await page.waitForTimeout(800);
-            const stayWebButton = page.locator(
-                'button:has-text("Rester sur le Web"), ' +
-                'button:has-text("Stay on web"), ' +
-                'button[jsaction*="stay"], ' +
-                'button[aria-label*="web" i]'
-            ).first();
-            const isVisible = await stayWebButton.isVisible({ timeout: 2000 }).catch(() => false);
-            if (isVisible) {
-                await stayWebButton.click({ timeout: 3000, force: true });
-                console.log(`[POPUP] ✅ Clic — tentative ${attempt}`);
-                await page.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 4000 }).catch(() => { });
-                const stillVisible = await stayWebButton.isVisible({ timeout: 500 }).catch(() => false);
-                if (!stillVisible) {
-                    console.log(`[POPUP] 🎯 Succès après ${attempt} tentative(s)`);
-                    return true;
-                }
-            } else {
-                console.log(`[POPUP] ℹ️ Aucun popup à la tentative ${attempt}`);
-                return true;
+    return {
+        author: raw[0]?.[1] || '',
+        authorUrl: raw[0]?.[0] || '',
+        //authorId: raw[6] || '',
+        date: raw[1] || '',
+        rating: raw[4] || 0,
+        text: raw[3] || '',
+        // 🔔 Réponse du propriétaire (si elle existe)
+        ownerResponse: raw[14]
+            ? {
+                text: raw[14],
+                date: raw[15] || '',
+                //author: raw[19]?.[1] || 'Propriétaire',
+                //authorId: raw[19]?.[8] || ''
             }
-        } catch (err) {
-            console.warn(`[POPUP] ⚠️ Erreur tentative ${attempt}:`, err.message);
-        }
-        if (attempt < maxRetries) await page.waitForTimeout(1000 + Math.random() * 1000 * attempt);
-    }
-    console.error(`[POPUP] ❌ Échec après ${maxRetries} tentatives`);
-    return false;
+            : null,
+        // 🔑 Clés uniques pour dédupliquer
+        rawId: raw[27] || raw[8] || '', // token pagination / review_id / fallback
+        //placeId: raw[24]?.[1] || '',
+        //visited: raw[33]?.[2] || null,
+        //timestamp: raw[34] || null
+    };
 }
+
+
+
+
 
 // ========================================================================
-// ✅ UTILITAIRES
+// ✅ EXTRAIRE LA RÉPONSE MANQUANTE EN NAVIGUANT VERS LE PROFIL UTILISATEUR
 // ========================================================================
-
-async function debugPageHTML(page, label = "state") {
-    try {
-        const buttons = await page.evaluate(() => {
-            return Array.from(document.querySelectorAll('button'))
-                .filter(btn => {
-                    const style = window.getComputedStyle(btn);
-                    return style.display !== 'none' && style.visibility !== 'hidden' && btn.offsetWidth > 0;
-                })
-                .map(btn => ({
-                    text: btn.innerText.trim(),
-                    ariaLabel: btn.getAttribute('aria-label') || '',
-                    dataId: btn.getAttribute('data-id') || '',
-                    jsname: btn.getAttribute('jsname') || ''
-                }))
-                .filter(btn => btn.text || btn.ariaLabel);
-        });
-
-        if (buttons.length === 0) {
-            console.log(`[BUTTONS:${label}] ❌ Aucun bouton visible`);
-        } else {
-            console.log(`[BUTTONS:${label}] ✅ ${buttons.length} bouton(s) trouvé(s):`);
-            buttons.forEach((btn, i) => {
-                console.log(`  ${i + 1}. "${btn.text}" | aria="${btn.ariaLabel}" | jsname="${btn.jsname}"`);
-            });
-        }
-    } catch (err) {
-        console.warn(`[BUTTONS:${label}] ⚠️ Erreur:`, err.message);
+async function fetchMissingOwnerResponse(context, authorUrl) {
+    if (!authorUrl || !authorUrl.includes("google.com/maps/contrib/")) {
+        console.warn(`[AUTHOR] ⚠️ URL invalide: ${authorUrl}`);
+        return null;
     }
-}
-function generateStableReviewId(author, date, text, fallbackId) {
-    if (fallbackId) return fallbackId;
-    const input = `${author || ''}|${date || ''}|${(text || '').substring(0, 200)}`;
-    let hash = 0;
-    for (let i = 0; i < input.length; i++) {
-        const char = input.charCodeAt(i);
-        hash = (hash << 5) - hash + char;
-        hash = hash & hash;
-    }
-    return Math.abs(hash).toString(36);
-}
 
-function humanDelay(min = 800, max = 1800) {
-    return new Promise((res) => setTimeout(res, Math.random() * (max - min) + min));
-}
+    console.log(`[AUTHOR] 🔍 Ouverture profil: ${authorUrl.split('/').pop().split('?')[0]}`);
 
-async function launchBrowser() {
-    const MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 10; SM-G970F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36";
-    const browser = await chromium.launch({
-        headless: false,
-        executablePath: process.env.CHROME_PATH || undefined,
-    });
-    const context = await browser.newContext({
-        userAgent: MOBILE_USER_AGENT,
-        viewport: { width: 375, height: 768 },
-        locale: "fr-FR",
-        timezoneId: "Europe/Paris",
-    });
-
-    // Bloquer redirections mobiles
-    await context.route('**/*', route => {
-        const url = route.request().url();
-        if (url.startsWith('intent://')) {
-            console.log(`[BLOCK] 🔒 Bloqué intent://`);
-            return route.abort();
-        }
-        if (/google\.com\/maps.*[?&](entry=ml|utm_campaign=ml-ardl)/.test(url)) {
-            const webUrl = url
-                .replace(/entry=ml[^&]*/g, '')
-                .replace(/utm_campaign=ml-ardl[^&]*/g, '')
-                .replace(/\?&/, '?')
-                .replace(/\?$/, '')
-                .replace(/&$/, '');
-            console.log(`[REDIRECT] 🔄 Forcé mode web`);
-            return route.fulfill({
-                status: 302,
-                headers: { Location: webUrl },
-                body: ''
-            });
-        }
-        return route.continue();
-    });
-
-    await context.addInitScript(() => {
-        Object.defineProperty(navigator, "webdriver", { get: () => false });
-        window.chrome = { runtime: {} };
-        Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
-
-        // 🔥 Supprimer les spinners Google Wiz (non intrusif, safe)
-        const observer = new MutationObserver(() => {
-            document.querySelectorAll('.wiz-spinner, [jsname="wiz-spinner"]').forEach(el => {
-                if (el.style.display !== 'none') {
-                    el.style.display = 'none';
-                }
-            });
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-    });
-    console.log("[MOBILE] ✅ Navigateur lancé en mode mobile");
-    return { browser, context };
-}
-
-async function diagnosePage(page) {
-    return await page.evaluate(() => {
-        const count = document.querySelectorAll('div.hjmQqc').length;
-        const authors = [...document.querySelectorAll('.IaK8zc.CVo7Bb')].slice(0, 3).map(el => el.textContent?.trim());
-        return { version: count > 0 ? 'mobile' : 'unknown', reviewCount: count, sampleAuthors: authors, url: window.location.href };
-    });
-}
-
-async function clickReviewAndGetResponse(page, reviewElement, index) {
     try {
-        console.log(`[MOBILE] 🔍 Traitement de l'avis #${index}...`);
-        await reviewElement.scrollIntoViewIfNeeded();
-        await humanDelay(300, 500);
+        const page = await context.newPage();
+        await page.goto(authorUrl, { waitUntil: 'networkidle', timeout: 60000 });
 
-        const authorButton = reviewElement.locator('.IaK8zc.CVo7Bb, button.IaK8zc').first();
-        if (await authorButton.count() === 0) {
-            console.log(`[MOBILE] ⚠️ Impossible de trouver le nom de l'utilisateur`);
-            return null;
+        // Gestion consent si besoin (nouveau contexte = nouveau cookie non injecté)
+        if (page.url().includes('consent.google.com')) {
+            await acceptGoogleConsent(page);
         }
 
-        await authorButton.click();
-        console.log(`[MOBILE] ✅ Clic sur le nom de l'utilisateur`);
-        await humanDelay(2000, 3000);
+        await bypassMapsPopupWithRetry(page)
+
+        // Clic sur onglet "Avis"
+        await clickReviewsTab(page);
 
         const hasReviews = await page.evaluate(() => {
             const bodyText = document.body.innerText || '';
@@ -250,109 +136,40 @@ async function clickReviewAndGetResponse(page, reviewElement, index) {
         if (!hasReviews) {
             console.log(`[MOBILE] ℹ️ L'utilisateur n'a pas d'avis publics`);
 
-            // RETOUR AVEC LA MÊME LOGIQUE QUE LE RESTE DU CODE
-            console.log(`[MOBILE] ⬅️ Retour en arrière (utilisateur sans avis)...`);
-
-            // Premier retour: fermer le profil utilisateur
-            let firstBack = false;
-            try {
-                const backBtn = page.locator('button.wrp8Qd, button[class*="wrp8Qd"]').first();
-                if (await backBtn.count() > 0) {
-                    await backBtn.click({ timeout: 2000, force: true });
-                    console.log(`[MOBILE] ✅ Retour avec bouton`);
-                    firstBack = true;
-                }
-            } catch (e) { }
-
-            if (!firstBack) {
-                await page.keyboard.press('Escape');
-                console.log(`[MOBILE] ✅ Retour avec Escape`);
-            }
-            await humanDelay(2000, 3000);
-
-            // Vérifier qu'on est bien revenu
-            const backOnList = await page.evaluate(() => {
-                const count = document.querySelectorAll('div.hjmQqc').length;
-                console.log(`Vérification: ${count} avis visibles`);
-                return count > 0;
-            });
-
-            if (!backOnList) {
-                console.log(`[MOBILE] ⚠️ Pas revenu sur la liste, tentative de récupération...`);
-                await page.keyboard.press('Escape');
-                await humanDelay(1500, 2000);
-            } else {
-                console.log(`[MOBILE] ✅ De retour sur la liste des avis`);
-            }
-
             return null;
         }
 
         console.log(`[MOBILE] ✅ L'utilisateur a des avis`);
         await humanDelay(2000, 3000);
 
-        const securicarReview = await page.evaluate(() => {
+        const premiumReview = await page.evaluate(() => {
             const addressElements = document.querySelectorAll('div.csaqw');
             console.log(`Recherche parmi ${addressElements.length} adresses`);
 
             for (let i = 0; i < addressElements.length; i++) {
                 const address = addressElements[i].innerText || '';
                 if (address.includes('5 Rue Henri') && address.includes('Cenon')) {
-                    console.log(`✅ SecuriCar trouvé à l'index ${i}`);
+                    console.log(`✅ premium trouvé à l'index ${i}`);
                     return i;
                 }
             }
             return -1;
         });
 
-        if (securicarReview === -1) {
-            console.log(`[MOBILE] ⚠️ Avis SecuriCar non trouvé`);
-
-            // RETOUR AVEC BOUTON/ESCAPE
-            console.log(`[MOBILE] ⬅️ Retour en arrière...`);
-
-            let backSuccess = false;
-            try {
-                const backBtn = page.locator('button.wrp8Qd, button[class*="wrp8Qd"]').first();
-                if (await backBtn.count() > 0) {
-                    await backBtn.click({ timeout: 2000, force: true });
-                    console.log(`[MOBILE] ✅ Retour avec bouton`);
-                    backSuccess = true;
-                }
-            } catch (e) { }
-
-            if (!backSuccess) {
-                await page.keyboard.press('Escape');
-                console.log(`[MOBILE] ✅ Retour avec Escape`);
-            }
-            await humanDelay(2000, 3000);
-
-            // Vérifier retour
-            const backOnList = await page.evaluate(() => {
-                const count = document.querySelectorAll('div.hjmQqc').length;
-                console.log(`Vérification: ${count} avis visibles`);
-                return count > 0;
-            });
-
-            if (!backOnList) {
-                console.log(`[MOBILE] ⚠️ Pas revenu sur la liste, tentative supplémentaire...`);
-                await page.keyboard.press('Escape');
-                await humanDelay(1500, 2000);
-            } else {
-                console.log(`[MOBILE] ✅ De retour sur la liste des avis`);
-            }
+        if (premiumReview === -1) {
+            console.log(`[MOBILE] ⚠️ Avis premium non trouvé`);
 
             return null;
         }
 
-        console.log(`[MOBILE] ✅ Avis trouvé à l'index ${securicarReview}`);
+        console.log(`[MOBILE] ✅ Avis trouvé à l'index ${premiumReview}`);
 
         const selectorsToTry = ['div[jsaction*="review"]', 'div[data-review-id]', 'div.OXdGle', 'div.csaqw'];
         let clicked = false;
         for (const selector of selectorsToTry) {
             const elements = await page.locator(selector).all();
-            if (elements.length > securicarReview) {
-                const reviewToClick = page.locator(selector).nth(securicarReview);
+            if (elements.length > premiumReview) {
+                const reviewToClick = page.locator(selector).nth(premiumReview);
                 await reviewToClick.scrollIntoViewIfNeeded();
                 await humanDelay(500, 800);
                 await reviewToClick.click();
@@ -364,40 +181,6 @@ async function clickReviewAndGetResponse(page, reviewElement, index) {
 
         if (!clicked) {
             console.log(`[MOBILE] ⚠️ Impossible de cliquer`);
-
-            // RETOUR AVEC BOUTON/ESCAPE
-            console.log(`[MOBILE] ⬅️ Retour en arrière...`);
-
-            let backSuccess = false;
-            try {
-                const backBtn = page.locator('button.wrp8Qd, button[class*="wrp8Qd"]').first();
-                if (await backBtn.count() > 0) {
-                    await backBtn.click({ timeout: 2000, force: true });
-                    console.log(`[MOBILE] ✅ Retour avec bouton`);
-                    backSuccess = true;
-                }
-            } catch (e) { }
-
-            if (!backSuccess) {
-                await page.keyboard.press('Escape');
-                console.log(`[MOBILE] ✅ Retour avec Escape`);
-            }
-            await humanDelay(2000, 3000);
-
-            // Vérifier retour
-            const backOnList = await page.evaluate(() => {
-                const count = document.querySelectorAll('div.hjmQqc').length;
-                console.log(`Vérification: ${count} avis visibles`);
-                return count > 0;
-            });
-
-            if (!backOnList) {
-                console.log(`[MOBILE] ⚠️ Pas revenu sur la liste, tentative supplémentaire...`);
-                await page.keyboard.press('Escape');
-                await humanDelay(1500, 2000);
-            } else {
-                console.log(`[MOBILE] ✅ De retour sur la liste des avis`);
-            }
 
             return null;
         }
@@ -510,155 +293,213 @@ async function clickReviewAndGetResponse(page, reviewElement, index) {
             return null;
         });
 
-        // Retour en arrière (2 fois)
-        console.log(`[MOBILE] ⬅️ Retour en arrière...`);
 
-        let firstBack = false;
-        try {
-            const backBtn = page.locator('button.wrp8Qd, button[class*="wrp8Qd"]').first();
-            if (await backBtn.count() > 0) {
-                await backBtn.click({ timeout: 2000, force: true });
-                console.log(`[MOBILE] ✅ Premier retour avec bouton`);
-                firstBack = true;
-            }
-        } catch (e) { }
-
-        if (!firstBack) {
-            await page.keyboard.press('Escape');
-            console.log(`[MOBILE] ✅ Premier retour avec Escape`);
-        }
-        await humanDelay(2000, 3000);
-
-        let secondBack = false;
-        try {
-            const backBtn = page.locator('button.wrp8Qd, button[class*="wrp8Qd"]').first();
-            if (await backBtn.count() > 0) {
-                await backBtn.click({ timeout: 2000, force: true });
-                console.log(`[MOBILE] ✅ Deuxième retour avec bouton`);
-                secondBack = true;
-            }
-        } catch (e) { }
-
-        if (!secondBack) {
-            await page.keyboard.press('Escape');
-            console.log(`[MOBILE] ✅ Deuxième retour avec Escape`);
-        }
-        await humanDelay(2000, 3000);
-
-        const backOnList = await page.evaluate(() => {
-            const count = document.querySelectorAll('div.hjmQqc').length;
-            console.log(`Vérification: ${count} avis visibles`);
-            return count > 0;
-        });
-
-        if (!backOnList) {
-            console.log(`[MOBILE] ⚠️ Pas revenu sur la liste, tentative de récupération...`);
-            await page.keyboard.press('Escape');
-            await humanDelay(1500, 2000);
-        } else {
-            console.log(`[MOBILE] ✅ De retour sur la liste des avis`);
-        }
-
-        if (response) {
-            console.log(`[MOBILE] ✅ Réponse trouvée`);
-        } else {
-            console.log(`[MOBILE] ℹ️ Pas de réponse`);
-        }
-
+        await page.close();
         return response;
 
-    } catch (error) {
-        console.log(`[MOBILE] ⚠️ Erreur: ${error.message}`);
-
-        // Tentative de récupération avec boutons + Escape
-        console.log(`[MOBILE] 🔄 Tentative de récupération...`);
-
-        try {
-            const backBtn = page.locator('button.wrp8Qd, button[class*="wrp8Qd"]').first();
-            if (await backBtn.count() > 0) {
-                await backBtn.click({ timeout: 2000 });
-                await humanDelay(1500, 2000);
-            }
-        } catch (e) { }
-
-        await page.keyboard.press('Escape');
-        await humanDelay(1000, 1500);
-        await page.keyboard.press('Escape');
-        await humanDelay(1000, 1500);
-
+    } catch (err) {
+        console.warn(`[AUTHOR] ⚠️ Erreur profil ${authorUrl}:`, err.message);
+        try { await context.pages().pop()?.close(); } catch (e) { }
         return null;
     }
 }
-async function handleMobilePopup(page) {
-    try {
-        const stayWebButton = page.getByRole('button', { name: /Rester sur le Web|Stay on web/i });
-        if (await stayWebButton.count() > 0) {
-            await stayWebButton.click();
-            await humanDelay(1500, 2500);
-        }
-    } catch (e) {
-        console.log('[POPUP]', e);
+// ========================================================================
+// ✅ BYPASS POPUP MOBILE
+// ========================================================================
 
-    }
-}
-
-async function getTotalReviewCount(page) {
-    return await page.evaluate(() => {
-        const text = document.body.innerText;
-        const match = text.match(/(\d+)\s+avis/i);
-        return match ? parseInt(match[1], 10) : null;
-    });
-}
-
-async function clickReviewsTab(page) {
-    console.log("[MOBILE] 🔍 Clic sur onglet Avis...");
-    await humanDelay(2000, 3000);
-
-    const strategies = [
-        async () => {
-            const btn = page.locator('button').filter({ hasText: /^Avis$/i });
-            if (await btn.count() > 0) {
-                await btn.first().click({ timeout: 5000 });
-                return true;
-            }
-            return false;
-        },
-        async () => {
-            const btn = page.locator('button[aria-label*="avis" i]');
-            if (await btn.count() > 0) {
-                await btn.first().click({ timeout: 5000 });
-                return true;
-            }
-            return false;
-        }
-    ];
-
-    for (const strategy of strategies) {
+async function bypassMapsPopupWithRetry(page, maxRetries = 3) {
+    let attempt = 0;
+    while (attempt < maxRetries) {
         try {
-            if (await strategy()) {
-                console.log(`[MOBILE] ✅ Onglet cliqué`);
-                await humanDelay(3000, 4000);
+            attempt++;
+            await page.waitForTimeout(800);
+            const stayWebButton = page.locator(
+                'button:has-text("Rester sur le Web"), ' +
+                'button:has-text("Stay on web"), ' +
+                'button[jsaction*="stay"], ' +
+                'button[aria-label*="web" i]'
+            ).first();
+            const isVisible = await stayWebButton.isVisible({ timeout: 2000 }).catch(() => false);
+            if (isVisible) {
+                await stayWebButton.click({ timeout: 3000, force: true });
+                console.log(`[POPUP] ✅ Clic — tentative ${attempt}`);
+                await page.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 4000 }).catch(() => { });
+                const stillVisible = await stayWebButton.isVisible({ timeout: 500 }).catch(() => false);
+                if (!stillVisible) {
+                    console.log(`[POPUP] 🎯 Succès après ${attempt} tentative(s)`);
+                    return true;
+                }
+            } else {
+                console.log(`[POPUP] ℹ️ Aucun popup à la tentative ${attempt}`);
                 return true;
             }
-        } catch (e) { }
+        } catch (err) {
+            console.warn(`[POPUP] ⚠️ Erreur tentative ${attempt}:`, err.message);
+        }
+        if (attempt < maxRetries) await page.waitForTimeout(1000 + Math.random() * 1000 * attempt);
     }
+    console.error(`[POPUP] ❌ Échec après ${maxRetries} tentatives`);
     return false;
 }
 
-async function ensureAllReviewsVisible(page) {
-    try {
-        await humanDelay(1500, 2000);
-        const sortButton = page.locator('button[aria-label*="Trier"]').first();
-        if (await sortButton.count() > 0) {
-            await sortButton.click();
-            await humanDelay(1000, 1500);
-            const newestOption = page.locator('div[role="menuitemradio"]:has-text("récents")').first();
-            if (await newestOption.count() > 0) {
-                await newestOption.click();
-                await humanDelay(2000, 3000);
+// ========================================================================
+// ✅ UTILITAIRES
+// ========================================================================
+
+
+function humanDelay(min = 800, max = 1800) {
+    return new Promise((res) => setTimeout(res, Math.random() * (max - min) + min));
+}
+
+async function launchBrowser() {
+    const MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.127 Mobile Safari/537.36";
+    const browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.CHROME_PATH || undefined,
+    });
+    const context = await browser.newContext({
+        userAgent: MOBILE_USER_AGENT,
+        viewport: { width: 1024, height: 768 },
+        locale: "fr-FR",
+        timezoneId: "Europe/Paris",
+    });
+
+    // Bloquer redirections mobiles
+    await context.route('**/*', route => {
+        const url = route.request().url();
+        if (url.startsWith('intent://')) {
+            console.log(`[BLOCK] 🔒 Bloqué intent://`);
+            return route.abort();
+        }
+        if (/google\.com\/maps.*[?&](entry=ml|utm_campaign=ml-ardl)/.test(url)) {
+            const webUrl = url
+                .replace(/entry=ml[^&]*/g, '')
+                .replace(/utm_campaign=ml-ardl[^&]*/g, '')
+                .replace(/\?&/, '?')
+                .replace(/\?$/, '')
+                .replace(/&$/, '');
+            console.log(`[REDIRECT] 🔄 Forcé mode web`);
+            return route.fulfill({
+                status: 302,
+                headers: { Location: webUrl },
+                body: ''
+            });
+        }
+        return route.continue();
+    });
+
+    await context.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => false });
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
+    });
+    console.log("[MOBILE] ✅ Navigateur lancé en mode mobile");
+    return { browser, context };
+}
+
+
+async function clickReviewsTab(page) {
+    console.log("[MOBILE] 🔍 Recherche onglet Avis...");
+    await humanDelay(2000, 3000);
+
+    // ✅ Stratégies multiples avec logs détaillés
+    const strategies = [
+        {
+            name: 'Texte exact "Avis"',
+            fn: async () => {
+                const btn = page.locator('button').filter({ hasText: /^Avis$/i });
+                const count = await btn.count();
+                console.log(`[MOBILE] 🔍 Stratégie 1: ${count} bouton(s) avec texte "Avis"`);
+                if (count > 0) {
+                    await btn.first().click({ timeout: 5000 });
+                    return true;
+                }
+                return false;
+            }
+        },
+        {
+            name: 'aria-label contient "avis"',
+            fn: async () => {
+                const btn = page.locator('button[aria-label*="avis" i]');
+                const count = await btn.count();
+                console.log(`[MOBILE] 🔍 Stratégie 2: ${count} bouton(s) avec aria-label "avis"`);
+                if (count > 0) {
+                    await btn.first().click({ timeout: 5000 });
+                    return true;
+                }
+                return false;
+            }
+        },
+        {
+            name: 'Bouton contenant "108 avis"',
+            fn: async () => {
+                const btn = page.locator('button:has-text("avis")');
+                const count = await btn.count();
+                console.log(`[MOBILE] 🔍 Stratégie 3: ${count} bouton(s) contenant "avis"`);
+                if (count > 0) {
+                    // Trouver celui qui contient un chiffre
+                    const allButtons = await btn.all();
+                    for (let i = 0; i < allButtons.length; i++) {
+                        const text = await allButtons[i].textContent();
+                        if (text && /\d+\s+avis/i.test(text)) {
+                            console.log(`[MOBILE] 🎯 Trouvé: "${text.trim()}"`);
+                            await allButtons[i].click({ timeout: 5000 });
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        },
+        {
+            name: 'Tab avec role="tab"',
+            fn: async () => {
+                const tabs = page.locator('[role="tab"]');
+                const count = await tabs.count();
+                console.log(`[MOBILE] 🔍 Stratégie 4: ${count} tab(s) trouvé(s)`);
+                if (count > 0) {
+                    const allTabs = await tabs.all();
+                    for (let i = 0; i < allTabs.length; i++) {
+                        const text = await allTabs[i].textContent();
+                        if (text && /avis/i.test(text)) {
+                            console.log(`[MOBILE] 🎯 Tab trouvé: "${text.trim()}"`);
+                            await allTabs[i].click({ timeout: 5000 });
+                            return true;
+                        }
+                    }
+                }
+                return false;
             }
         }
-    } catch (e) { }
+    ];
+
+    // Tester chaque stratégie
+    for (const strategy of strategies) {
+        try {
+            console.log(`[MOBILE] 🧪 Test: ${strategy.name}`);
+            if (await strategy.fn()) {
+                console.log(`[MOBILE] ✅ Succès avec: ${strategy.name}`);
+                await humanDelay(3000, 4000);
+                return true;
+            }
+        } catch (e) {
+            console.warn(`[MOBILE] ⚠️ Échec ${strategy.name}:`, e.message);
+        }
+    }
+
+    // Si toutes les stratégies échouent, dump HTML pour debug
+    console.error('[MOBILE] ❌ Toutes les stratégies ont échoué');
+    const pageContent = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        return buttons.map(btn => ({
+            text: btn.textContent?.trim().substring(0, 100),
+            aria: btn.getAttribute('aria-label'),
+            visible: btn.offsetWidth > 0
+        })).filter(b => b.visible);
+    });
+    console.log('[MOBILE] 📋 Boutons visibles:', JSON.stringify(pageContent, null, 2));
+
+    return false;
 }
 
 async function findScrollablePanel(page) {
@@ -667,9 +508,6 @@ async function findScrollablePanel(page) {
     return page.locator('div[tabindex="-1"]').first();
 }
 
-// ========================================================================
-// ✅ SCRAPER PRINCIPAL (AVEC GESTION DU CONSENTEMENT)
-// ========================================================================
 async function sendDataToN8N(reviews) {
     if (reviews.length > 0) {
         try {
@@ -689,191 +527,178 @@ async function sendDataToN8N(reviews) {
     }
 }
 
+// ========================================================================
+// ✅ SCRAPER PRINCIPAL (AVEC GESTION DU CONSENTEMENT)
+// ========================================================================
+
 async function scrape(url) {
     const { browser, context } = await launchBrowser();
     const page = await context.newPage();
-    page.on('console', msg => console.log(`[BROWSER] ${msg.text()}`));
 
-    try {
-        // ✅ ÉTAPE 1: Injecter cookie CONSENT
-        await page.context().addCookies([
-            {
-                name: 'CONSENT',
-                value: 'YES+cb.20210720-07-p0.fr+FX+410',
-                domain: '.google.com',
-                path: '/',
-                expires: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60,
-                httpOnly: false,
-                secure: true,
-                sameSite: 'Lax'
-            }
-        ]);
-        console.log('[COOKIE] ✅ Cookie CONSENT injecté');
+    // ========================================================================
+    // ✅ INTERCEPTION DES REQUÊTES XHR — COEUR DU SCRIPT
+    // ========================================================================
+    const rawReviews = [];
+    let totalReviewCount = null;
+    const seenReviewIds = new Set();
 
-        // ✅ ÉTAPE 2: Navigation
-        console.log("[MOBILE] ➡️ Navigation...");
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    page.on('response', async (response) => {
+        const url = response.url();
+        if (!url.includes('/preview/review/listentitiesreviews')) return;
 
-        // ✅ ÉTAPE 4: Vérifier si on est sur consent.google.com
-        const currentUrl = page.url();
-        console.log(`[SCRAPER] URL courante: ${currentUrl}`);
+        try {
 
-        if (currentUrl.includes('consent.google.com')) {
-            console.log('[CONSENT] ⚠️ Écran de consentement détecté, tentative d\'acceptation...');
-            const accepted = await acceptGoogleConsent(page);
+            // 🔑 Récupérer le texte brut (pas .json())
+            const text = await response.text();
 
-            if (!accepted) {
-                throw new Error('❌ Impossible d\'accepter le consentement Google');
+            // 🔧 Supprimer le préfixe Google: )]}'\n
+            const cleanText = text.trim().replace(/^\)\]\}'\s*/, '');
+            if (!cleanText || cleanText === 'null') {
+                console.warn('[XHR] ⚠️ Réponse vide ou null');
+                return;
             }
 
-            // Vérifier qu'on est bien sur Maps après acceptation
-            const newUrl = page.url();
-            if (!newUrl.includes('google.com/maps')) {
-                throw new Error('❌ Toujours bloqué après acceptation du consentement');
+            const data = JSON.parse(cleanText);
+
+            const batch = data[2] || [];
+            const stats = data[3] || [];
+
+
+            if (Array.isArray(stats) && stats.length >= 5 && typeof stats[4] === 'number') {
+                totalReviewCount = stats[4];
             }
-            console.log('[CONSENT] ✅ Consentement accepté, sur Google Maps');
-        } else {
-            console.log('[CONSENT] ✅ Pas de consentement requis');
+
+            if (batch.length > 0) {
+                console.log(`[XHR] ✅ +${batch.length} avis — total cumulé: ${rawReviews.length + batch.length}`);
+                rawReviews.push(...batch);
+            }
+
+        } catch (err) {
+            console.warn('[XHR] ⚠️ Erreur parsing réponse:', err.message);
+        }
+    });
+
+
+
+    console.log("[MOBILE] ➡️ Navigation...");
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+
+    // ✅ ÉTAPE 4: Vérifier si on est sur consent.google.com
+    const currentUrl = page.url();
+    console.log(`[SCRAPER] URL courante: ${currentUrl}`);
+
+    if (currentUrl.includes('consent.google.com')) {
+        console.log('[CONSENT] ⚠️ Écran de consentement détecté, tentative d\'acceptation...');
+        const accepted = await acceptGoogleConsent(page);
+
+        if (!accepted) {
+            console.log('❌ Impossible d\'accepter le consentement Google');
         }
 
-        await handleMobilePopup(page);
-        await bypassMapsPopupWithRetry(page)
-
-        await clickReviewsTab(page);
-        await ensureAllReviewsVisible(page);
-
-        // ✅ ÉTAPE 11: Diagnostics
-        const diagnostics = await diagnosePage(page);
-        const totalExpected = await getTotalReviewCount(page);
-        console.log(`[MOBILE] 📊 ${diagnostics.reviewCount} visibles / ${totalExpected || '?'} total`);
-        console.log(`[MOBILE] 🎯 Objectif: Collecter TOUS les ${totalExpected} avis`);
-
-        const panel = await findScrollablePanel(page);
-
-        console.log("[MOBILE] 🚀 Scraping démarré");
-        console.log(`[MOBILE] 🎯 Objectif: Collecter ${totalExpected || '?'} avis`);
-
-        // ... Suite du scraping (code existant)
-
-        const reviewsMap = new Map();
-        let currentIndex = 0;
-        let consecutiveNoNewReviews = 0;
-        const MAX_CONSECUTIVE_FAILS = 5;
-        console.log("[MOBILE] 🚀 Scraping démarré");
-
-        // Prendre une capture d'écran et retourner la base64 ici
-        const screenshotBuffer = await page.screenshot({ fullPage: true });
-        const screenshotBase64 = screenshotBuffer.toString('base64');
-        console.log(`[MOBILE] 📸 Screenshot (base64 longueur=${screenshotBase64.length})`);
-        //console.log(`[MOBILE] 📸 Screenshot (base64 ${screenshotBase64})`);
-
-        while (true) {
-            const reviewNodes = await page.locator('div.hjmQqc').all();
-            console.log(reviewNodes.length);
-
-
-            if (currentIndex >= reviewNodes.length) {
-                console.log(`[MOBILE] 📜 Scroll... (${reviewsMap.size}/${totalExpected || '?'} traités)`);
-                await panel.evaluate(el => el.scrollBy(0, 1500));
-                await humanDelay(3000, 4000);
-
-                const newCount = await page.locator('div.hjmQqc').count();
-
-                if (newCount <= reviewNodes.length) {
-                    consecutiveNoNewReviews++;
-                    console.log(`[MOBILE] ⚠️ Pas de nouveaux avis (${consecutiveNoNewReviews}/${MAX_CONSECUTIVE_FAILS})`);
-
-                    if (consecutiveNoNewReviews >= MAX_CONSECUTIVE_FAILS) {
-                        console.log(`[MOBILE] ✅ Fin: ${MAX_CONSECUTIVE_FAILS} scrolls sans nouveaux avis`);
-                        break;
-                    }
-                } else {
-                    consecutiveNoNewReviews = 0;
-                    console.log(`[MOBILE] ✅ ${newCount - reviewNodes.length} nouveaux avis chargés`);
-                }
-                continue;
-            }
-
-            const reviewNode = reviewNodes[currentIndex];
-            const reviewData = await reviewNode.evaluate(el => ({
-                author: el.querySelector('.IaK8zc.CVo7Bb')?.textContent?.trim() || '',
-                date: el.querySelector('.bHyEBc')?.textContent?.trim() || '',
-                rating: parseInt(el.querySelector('.HeTgld')?.getAttribute('aria-label')?.match(/(\d+)/)?.[1] || '0', 10),
-                text: el.querySelector('.d5K5Pd')?.textContent?.trim() || '',
-                rawId: el.getAttribute('data-review-id') || null
-            }));
-
-            const id = generateStableReviewId(reviewData.author, reviewData.date, reviewData.text, reviewData.rawId);
-
-            if (reviewsMap.has(id)) {
-                console.log(`[MOBILE] ⏭️ Avis déjà traité: ${reviewData.author}`);
-                currentIndex++;
-                continue;
-            }
-
-            const progressPercent = totalExpected ? Math.round((reviewsMap.size / totalExpected) * 100) : '?';
-            console.log(`[MOBILE] 🔍 Avis #${reviewsMap.size + 1}/${totalExpected || '?'} (${progressPercent}%) — ${reviewData.author}`);
-
-            const ownerResponse = await clickReviewAndGetResponse(page, reviewNode, reviewsMap.size + 1);
-            reviewsMap.set(id, { ...reviewData, ownerResponse });
-            currentIndex++;
-
-            if (totalExpected && reviewsMap.size >= totalExpected) {
-                console.log(`\n[MOBILE] 🎉 Tous les avis collectés (${reviewsMap.size}/${totalExpected})`);
-                break;
-            }
-
-            // Vérification de l'état de la page
-            await humanDelay(1000, 1500);
-            const currentState = await diagnosePage(page);
-            console.log(`[MOBILE] 📊 État: ${currentState.reviewCount} avis visibles`);
-
-            if (currentState.reviewCount === 0) {
-                console.log(`[MOBILE] ⚠️ Liste perdue, restauration...`);
-                await clickReviewsTab(page);
-                await humanDelay(3000, 4000);
-
-                // Vérifier que la restauration a fonctionné
-                const restoredState = await diagnosePage(page);
-                if (restoredState.reviewCount > 0) {
-                    console.log(`[MOBILE] ✅ Liste restaurée: ${restoredState.reviewCount} avis visibles`);
-                    currentIndex = 0;
-                    consecutiveNoNewReviews = 0;
-                } else {
-                    console.log(`[MOBILE] ❌ Impossible de restaurer la liste`);
-                    break;
-                }
-            }
-
-            await humanDelay(1000, 1500);
+        // Vérifier qu'on est bien sur Maps après acceptation
+        const newUrl = page.url();
+        if (!newUrl.includes('google.com/maps')) {
+            console.log('❌ Toujours bloqué après acceptation du consentement');
         }
-
-
-        const reviews = Array.from(reviewsMap.values());
-        console.log(`\n[MOBILE] 📊 ${reviews.length}/${totalExpected || '?'} avis collectés`);
-        await browser.close();
-        await sendDataToN8N(reviews);
-        return reviews;
-
-    } catch (error) {
-        console.error("[MOBILE] ❌ Erreur:", error.message);
-
-        await browser.close();
-        throw error;
+        console.log('[CONSENT] ✅ Consentement accepté, sur Google Maps');
+    } else {
+        console.log('[CONSENT] ✅ Pas de consentement requis');
     }
+
+    console.log(`[SCRAPER] URL courante: ${currentUrl}`);
+
+    // 📌 Aller directement à l'onglet avis (évite filtres UI)
+    await page.evaluate(() => {
+        const tab = Array.from(document.querySelectorAll('button'))
+            .find(btn => /avis/i.test(btn.textContent));
+        if (tab) tab.click();
+    });
+    await humanDelay(2000, 3000);
+
+    const panel = await findScrollablePanel(page);
+
+    console.log("[MOBILE] 🚀 Début du scroll + interception XHR...");
+
+    let consecutiveNoNew = 0;
+    const MAX_NO_NEW = 3;
+
+    while (true) {
+        const currentCount = rawReviews.length;
+        console.log(`[MOBILE] 📜 Scroll (${currentCount} avis)`);
+
+        await panel.evaluate(el => el.scrollBy(0, 2000));
+        await humanDelay(3000, 4000);
+
+        // Attendre que de nouveaux avis arrivent (max 8s)
+        const start = Date.now();
+        while (rawReviews.length === currentCount && Date.now() - start < 8000) {
+            await page.waitForTimeout(300);
+        }
+
+        if (rawReviews.length === currentCount) {
+            consecutiveNoNew++;
+            console.log(`[MOBILE] ⚠️ Aucun nouvel avis (${consecutiveNoNew}/${MAX_NO_NEW})`);
+            if (consecutiveNoNew >= MAX_NO_NEW) break;
+        } else {
+            consecutiveNoNew = 0;
+        }
+
+        // ✅ Détection fin si on atteint le total connu
+        if (totalReviewCount && rawReviews.length >= totalReviewCount) {
+            console.log(`[MOBILE] 🎉 ${rawReviews.length}/${totalReviewCount} avis — fin`);
+            break;
+        }
+    }
+
+    const uniqueReviews = rawReviews
+        .map(parseReview)
+        .filter(r => r && !seenReviewIds.has(r.rawId) && seenReviewIds.add(r.rawId));
+
+    console.log(`\n[MOBILE] 📊 ${uniqueReviews.length} avis extraits via XHR`);
+
+    for (let i = 0; i < uniqueReviews.length; i++) {
+        const review = uniqueReviews[i];
+
+        if (!review.ownerResponse && review.authorUrl) {
+            console.log(`[ENRICH] ${i + 1}/${uniqueReviews.length} — ${review.author}`);
+
+            const response = await fetchMissingOwnerResponse(context, review.authorUrl);
+            if (response) {
+                review.ownerResponse = response;
+                console.log(`[ENRICH] ✅ Réponse trouvée pour ${review.author}`);
+            } else {
+                console.log(`[ENRICH] ℹ️ Aucune réponse pour ${review.author}`);
+            }
+
+            // ⏳ Délai respectueux
+            await humanDelay(1000, 2000);
+        }
+    }
+
+
+    await browser.close();
+    return uniqueReviews;
+
+
 }
 
 // ========================================================================
 // ✅ EXÉCUTION
 // ========================================================================
 
-scrape(CLEAN_URL)
-    .then(reviews => {
-        console.log(`\n${"=".repeat(80)}`);
-        console.log(`✅ ${reviews.length} avis collectés`);
-        console.log("=".repeat(80));
-    })
-    .catch(err => {
-        console.error("\n❌ Échec:", err.message);
-        process.exit(1);
-    });
+// ▶️ Exécution
+if (process.argv[1] === import.meta.url || process.argv[1].endsWith('scraper.js')) {
+    const job_id = 'scrape_' + new Date().toISOString().slice(0, 19).replace(/[:\-T]/g, '');
+    scrape(CLEAN_URL, job_id)
+        .then(async (reviews) => {
+            console.log(`\n${"=".repeat(80)}`);
+            console.log(`✅ ${reviews.length} avis collectés`);
+            console.log(`💬 ${reviews.filter(r => r.ownerResponse).length} avec réponse`);
+            console.log("=".repeat(80));
+            await sendDataToN8N(reviews);
+        })
+        .catch(async (err) => {
+            console.error("\n❌ Échec:", err.message);
+            process.exit(1);
+        });
+}
